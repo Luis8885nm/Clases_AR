@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <QCARConfig>
   <Tracking>
+    <ImageTarget name="PistaLogoARTarget" size="1.000000 1.000000" />
+    <ImageTarget name="TallerLogoARTarget" size="1.000000 0.751958" />
+    <ImageTarget name="911TurboBadgeARTarget" size="1.000000 0.750000" />
     <ImageTarget name="porscheARTarget" size="1.000000 0.932445" />
   </Tracking>
 </QCARConfig>
