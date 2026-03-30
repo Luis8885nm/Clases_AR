@@ -1,107 +1,242 @@
 using UnityEngine;
 using Vuforia;
 using System.Collections;
+using System.Collections.Generic;
+using TMPro;
+using UnityEngine.SceneManagement;
 
 public class NarradorPorschePro : MonoBehaviour
 {
-    [Header("Referencias de Movimiento")]
+    public enum TipoAccion { Taller, Pista, Gasolina, Garage, Meta }
+
+    [Header("Movimiento")]
     public ObserverBehaviour[] marcadores;
     public float velocidad = 2.0f;
     private bool seEstaMoviendo = false;
-    private int indiceMeta = -1;
+    private int ultimoIndiceVisitado = -1;
+    private bool esPrimerEscaneo = true;
 
-    [Header("Referencias Estéticas")]
-    // Lo dejamos vacío en el inspector, el código lo buscará solo
-    private Renderer mallaAuto;
+    [Header("Escenografía (Modelos en Targets)")]
+    // Arrastra aquí los modelos hijos de los targets en el mismo orden que la lista de marcadores
+    public GameObject[] decoracionesTargets;
+
+    [Header("Modelos Auto")]
+    public GameObject modeloNormal;
+    public GameObject modeloCarreras;
     public GameObject[] accesorios;
-    public ParticleSystem particulas;
-    public AudioSource sonido;
-    private Color colorOriginal;
+
+    [Header("Audio")]
+    public AudioSource musicaFondo;
+    public AudioSource sfxMotor;
+    public AudioClip sonidoVictoria;
+    public AudioClip sonidoLlegada;
+
+    [Header("Interfaz UI")]
+    public TextMeshProUGUI textoUI;
+    public TextMeshProUGUI textoTiempo;
+    public GameObject panelMenuPrincipal;
+    public GameObject panelAlertaRastreo;
+    public GameObject botonReiniciar;
+
+    [Header("Lógica")]
+    public float tiempoMaximo = 90f;
+    private float tiempoRestante;
+    private bool tieneModeloCarreras = false, tieneAleron = false, juegoTerminado = true;
+    private HashSet<int> eventosVisitados = new HashSet<int>();
+    private Dictionary<int, TipoAccion> mapaAcciones = new Dictionary<int, TipoAccion>();
 
     void Start()
     {
-        // --- AQUÍ ESTÁ EL TRUCO DE INGENIERÍA ---
-        // Buscamos el objeto por su nombre exacto en los hijos
-        GameObject piezaCarroceria = GameObject.Find("body_all_body_main_0_4");
+        panelMenuPrincipal.SetActive(true);
+        juegoTerminado = true;
+    }
 
-        if (piezaCarroceria != null)
+    public void IniciarJuego()
+    { // Conecta esto al botón "Iniciar Carrera"
+        panelMenuPrincipal.SetActive(false);
+        juegoTerminado = false;
+        botonReiniciar.SetActive(true);
+        tieneModeloCarreras = false;
+        tieneAleron = false;
+        modeloNormal.SetActive(true);
+        modeloCarreras.SetActive(false);
+        foreach (GameObject acc in accesorios) if (acc) acc.SetActive(false);
+        tiempoRestante = tiempoMaximo;
+        eventosVisitados.Clear();
+        ultimoIndiceVisitado = -1;
+        esPrimerEscaneo = true;
+
+        AsignarAccionesAleatorias();
+        if (musicaFondo) musicaFondo.Play();
+        foreach (GameObject deco in decoracionesTargets) if (deco) deco.SetActive(false);
+    }
+
+    void Update()
+    {
+        if (juegoTerminado) return;
+
+        tiempoRestante -= Time.deltaTime;
+        if (textoTiempo) textoTiempo.text = "TIEMPO: " + Mathf.Max(0, (int)tiempoRestante) + "s";
+
+        if (tiempoRestante <= 0) FinalizarJuego(false, "¡TIEMPO AGOTADO!");
+
+        ManejarRastreoPerdido();
+        if (!seEstaMoviendo) VerificarMarcadores();
+    }
+
+    void ManejarRastreoPerdido()
+    {
+        if (ultimoIndiceVisitado != -1 && panelAlertaRastreo)
         {
-            mallaAuto = piezaCarroceria.GetComponent<Renderer>();
-            if (mallaAuto != null)
+            var status = marcadores[ultimoIndiceVisitado].TargetStatus.Status;
+
+            // RIGIDEZ: Solo aceptamos TRACKED (vista directa al papel). 
+            // Ignoramos EXTENDED_TRACKED y LIMITED.
+            bool estaViendo = (status == Status.TRACKED);
+
+            // 1. Mostramos/Ocultamos el mensaje de alerta
+            panelAlertaRastreo.SetActive(!estaViendo);
+
+            // 2. APAGAR EL COCHE: Si no hay papel, el coche es invisible.
+            // Esto evita que se quede flotando en el aire.
+            foreach (Renderer r in GetComponentsInChildren<Renderer>())
             {
-                colorOriginal = mallaAuto.material.color;
-                Debug.Log("¡Carrocería encontrada y asignada automáticamente!");
+                r.enabled = estaViendo;
             }
         }
-        else
-        {
-            Debug.LogError("No se encontró el objeto 'body_all_body_main_0_4'. Revisa que el nombre sea exacto.");
-        }
-
-        // Apagar accesorios
-        foreach (GameObject obj in accesorios) if (obj != null) obj.SetActive(false);
     }
 
-    public void IrAlSiguientePaso()
+    void VerificarMarcadores()
     {
-        if (!seEstaMoviendo) StartCoroutine(MoverAuto());
-    }
-
-    IEnumerator MoverAuto()
-    {
-        Transform objetivo = null;
-        int idMarcadorLlegada = -1;
-
         for (int i = 0; i < marcadores.Length; i++)
         {
-            if (marcadores[i].TargetStatus.Status == Status.TRACKED ||
-                marcadores[i].TargetStatus.Status == Status.EXTENDED_TRACKED)
+            if (marcadores[i].TargetStatus.Status == Status.TRACKED)
             {
-                if (i != indiceMeta && Vector3.Distance(transform.position, marcadores[i].transform.position) > 0.1f)
+                if (i != ultimoIndiceVisitado)
                 {
-                    objetivo = marcadores[i].transform;
-                    idMarcadorLlegada = i;
+                    StartCoroutine(MoverAuto(i));
                     break;
                 }
             }
         }
-
-        if (objetivo == null) yield break;
-
+    }
+    IEnumerator MoverAuto(int indice)
+    {
         seEstaMoviendo = true;
-        float tiempo = 0;
-        Vector3 posInicial = transform.position;
-        Quaternion rotInicial = transform.rotation;
+        textoUI.text = "VIAJANDO AL OBJETIVO...";
 
-        while (tiempo < 1.0f)
+        // 1. Limpieza del Memorama (Apagar la decoración anterior)
+        if (ultimoIndiceVisitado != -1)
         {
-            tiempo += Time.deltaTime * velocidad;
-            transform.position = Vector3.Lerp(posInicial, objetivo.position, tiempo);
-            transform.rotation = Quaternion.Lerp(rotInicial, objetivo.rotation, tiempo);
-            yield return null;
+            TipoAccion accionAnterior = mapaAcciones[ultimoIndiceVisitado];
+            int indiceViejo = (int)accionAnterior;
+            if (decoracionesTargets[indiceViejo])
+                decoracionesTargets[indiceViejo].SetActive(false);
         }
 
-        indiceMeta = idMarcadorLlegada;
-        if (particulas != null) { particulas.transform.position = transform.position; particulas.Play(); }
-        if (sonido != null) sonido.Play();
+        // 2. Iniciamos Movimiento
+        transform.SetParent(null);
+        foreach (Renderer r in GetComponentsInChildren<Renderer>(true)) r.enabled = true;
 
-        EjecutarAccion(idMarcadorLlegada);
+        if (!esPrimerEscaneo)
+        {
+            float t = 0;
+            Vector3 pIni = transform.position; Quaternion rIni = transform.rotation;
+            while (t < 1.0f)
+            {
+                t += Time.deltaTime * velocidad;
+                transform.position = Vector3.Lerp(pIni, marcadores[indice].transform.position, t);
+                transform.rotation = Quaternion.Lerp(rIni, marcadores[indice].transform.rotation, t);
+                yield return null;
+            }
+        }
+        else
+        {
+            // --- RIGIDEZ DE INGENIERÍA: SNAP PERFECTO EN EL PRIMER ESCANEO ---
+            // 1. Emparentamos primero
+            transform.SetParent(marcadores[indice].transform);
+
+            // 2. Reseteamos coordenadas LOCALES a cero absoluto (0,0,0)
+            transform.localPosition = Vector3.zero;
+
+            // 3. Forzamos rotación local de 180 para que el coche te mire
+            transform.localRotation = Quaternion.Euler(0, 180f, 0);
+
+            esPrimerEscaneo = false;
+        }
+
+        // 3. LLEGADA Y DESCUBRIMIENTO
+        // (Asegurar el emparentado final para los movimientos Lerp)
+        transform.SetParent(marcadores[indice].transform);
+        ultimoIndiceVisitado = indice;
+        eventosVisitados.Add(indice);
+
+        TipoAccion accionActual = mapaAcciones[indice];
+        int indiceDecoracion = (int)accionActual;
+
+        if (decoracionesTargets[indiceDecoracion])
+        {
+            decoracionesTargets[indiceDecoracion].SetActive(true);
+            decoracionesTargets[indiceDecoracion].transform.SetParent(marcadores[indice].transform);
+            decoracionesTargets[indiceDecoracion].transform.localPosition = new Vector3(0, 0.05f, 0);
+            decoracionesTargets[indiceDecoracion].transform.localScale = new Vector3(0.015f, 0.015f, 0.015f);
+        }
+
+        if (sfxMotor && sonidoLlegada) sfxMotor.PlayOneShot(sonidoLlegada);
+        ProcesarAccionAleatoria(accionActual);
+
+        yield return new WaitForSeconds(1.0f);
         seEstaMoviendo = false;
     }
 
-    void EjecutarAccion(int id)
+    void ProcesarAccionAleatoria(TipoAccion accion)
     {
-        if (mallaAuto == null) return;
-
-        switch (id)
+        switch (accion)
         {
-            case 1:
-                foreach (GameObject obj in accesorios) if (obj != null) obj.SetActive(false);
-                int azar = Random.Range(0, accesorios.Length);
-                if (accesorios[azar] != null) accesorios[azar].SetActive(true);
+            case TipoAccion.Taller: tieneAleron = true; accesorios[1].SetActive(true); textoUI.text = "¡AERO MEJORADA!"; break;
+            case TipoAccion.Pista:
+                // Solo permitimos la conversión GT3 RS si no es el primer stop
+                if (eventosVisitados.Count > 1)
+                {
+                    tieneModeloCarreras = true;
+                    modeloNormal.SetActive(false);
+                    modeloCarreras.SetActive(true);
+                    textoUI.text = "¡CONVERSIÓN GT3 RS COMPLETA!";
+                    // encender un accesorio de carreras aquí
+                    accesorios[1].SetActive(true); // Enciende el Alerón
+                }
+                else
+                {
+                    // Si caes aquí en el primer stop, el coche no cambia, obligando a buscar más.
+                    textoUI.text = "¡PISTA LOCALIZADA! (Falta Taller)";
+                }
                 break;
-            case 2: mallaAuto.material.color = Color.red; break;
-            case 3: mallaAuto.material.color = colorOriginal; break;
+            case TipoAccion.Gasolina: textoUI.text = "¡CARGA COMPLETADA!"; break;
+            case TipoAccion.Garage: textoUI.text = "¡NEUMÁTICOS LISTOS!"; break;
+            case TipoAccion.Meta:
+                if (eventosVisitados.Count >= 5 && tieneModeloCarreras && tieneAleron) FinalizarJuego(true, "¡VICTORIA!");
+                else textoUI.text = "¡META! Te faltan objetivos."; break;
         }
     }
+
+    void FinalizarJuego(bool victoria, string msj)
+    {
+        juegoTerminado = true;
+        textoUI.text = msj;
+        botonReiniciar.SetActive(true);
+        if (victoria && sonidoVictoria) sfxMotor.PlayOneShot(sonidoVictoria);
+    }
+
+    void AsignarAccionesAleatorias()
+    {
+        List<TipoAccion> accs = new List<TipoAccion> { TipoAccion.Taller, TipoAccion.Pista, TipoAccion.Gasolina, TipoAccion.Garage, TipoAccion.Meta };
+        for (int i = 0; i < accs.Count; i++)
+        {
+            TipoAccion tmp = accs[i]; int r = Random.Range(i, accs.Count);
+            accs[i] = accs[r]; accs[r] = tmp;
+        }
+        for (int i = 0; i < marcadores.Length; i++) mapaAcciones[i] = accs[i];
+    }
+
+    public void Reiniciar() { SceneManager.LoadScene(SceneManager.GetActiveScene().name); }
 }
